@@ -1,27 +1,34 @@
 package Pod::POM::View::HTML::Filter;
-use base 'Pod::POM::View::HTML';
+use Pod::POM::View::HTML;
+our @ISA = qw( Pod::POM::View::HTML );
 
 use warnings;
 use strict;
 use Carp;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
+our $default = {
+        code     => sub { '<pre>' . $_[0] . '</pre>' },
+                verbatim => 1,
+                    };
+
 
 my %filter;
 my %builtin = (
+    default => $default,
     perl => {
         code     => \&perl_filter,
-        requires => [ qw( Perl::Tidy ) ],
+        requires => [qw( Perl::Tidy )],
         verbatim => 1,
     },
     html => {
         code     => \&html_filter,
-        requires => [ qw( Syntax::Highlight::HTML ) ],
+        requires => [qw( Syntax::Highlight::HTML )],
         verbatim => 1,
     },
 );
 
-my $HTML_PROTECT;
+my $HTML_PROTECT = 0;
 
 # automatically register built-in handlers
 my $INIT = 1;
@@ -80,10 +87,8 @@ sub view_for {
     return $for->text() . "\n\n" if $format =~ /^html\b/;
     if ( $format =~ /^filter\b/ ) {
         my $lang = (split '=', $format)[1];
-        if( exists $filter{$lang} ) {
-            return $filter{$lang}{code}->( $for->text, "" ) . "\n\n";
-        }
-        else { warn "$lang not supported in =for filter"; }
+        $lang = exists $filter{$lang} ? $lang : 'default';
+        return $filter{$lang}{code}->( $for->text, "" ) . "\n\n";
     }
     # fall-through
     return '';
@@ -98,23 +103,21 @@ sub view_begin {
     }
     elsif( $format eq 'filter' ) {
         my ($lang, $opts) = split(' ', $args, 2);
-        if( exists $filter{$lang} ) {
-            my $output;
-            if( $filter{$lang}{verbatim} ) {
-                $HTML_PROTECT++;
-                $output =
-                  $filter{$lang}{code}
-                  ->( join( "\n\n", map { $_->text } $begin->content), $opts );
-                $HTML_PROTECT--;
-            }
-            else {
-                push @{$self->{FILTER}}, [ $lang, $opts ];
-                $output = $begin->content->present($self);
-                pop @{$self->{FILTER}};
-            }
-            return $output;
+        $lang = exists $filter{$lang} ? $lang : 'default';
+        my $output;
+        if( $filter{$lang}{verbatim} ) {
+            $HTML_PROTECT++;
+            $output =
+              $filter{$lang}{code}
+              ->( join( "\n\n", map { $_->text } $begin->content), $opts );
+            $HTML_PROTECT--;
         }
-        else { warn "$lang not supported in =begin filter"; }
+        else {
+            push @{$self->{FILTER}}, [ $lang, $opts ];
+            $output = $begin->content->present($self);
+            pop @{$self->{FILTER}};
+        }
+        return $output;
     }
     # fall-through
     return '';
@@ -204,6 +207,11 @@ sub perl_filter {
     my ($ws) = $code =~ /^(\s*)/; # count the blanks on the first line
     $code =~ s/^$ws//gm;          # remove them
 
+    # Perl::Tidy 20031021 uses Getopt::Long and expects the default config
+    # this is a workaround (a patch was sent to Perl::Tidy's author)
+    my $glc = Getopt::Long::Configure();
+    Getopt::Long::ConfigDefaults();
+
     Perl::Tidy::perltidy(
         source      => \$code,
         destination => \$output,
@@ -214,6 +222,9 @@ sub perl_filter {
     $output =~ s!\A<pre>\n?!!;    # Perl::Tidy adds "<pre>\n"
     $output =~ s!\n</pre>\n\z!!m; #             and "\n</pre>\n"
     $output =~ s/^/$ws/gm;        # put the indentation back
+
+    # put back Getopt::Long previous configuration, if needed
+    Getopt::Long::Configure( $glc );
 
     return "<pre>$output</pre>\n";
 }
@@ -400,6 +411,21 @@ Pod::POM::View::HTML::Filter is shipped with a few built-in filters.
 They are all functions named I<lang>_filter.
 
 =over 4
+
+=item default
+
+This filter is called when the required filter is not known by
+Pod::POM::View::HTML::Filter. It simply wraps the content of the 
+=begin / =end section between C<< <pre> >>/C<< </pre> >>.
+
+The default filter is available from
+C<$Pod::POM::View::HTML::Filter::default>. This allows one to do:
+
+    Pod::POM::View::HTML::Filter->add(
+        $_ => $Pod::POM::View::HTML::Filter::default
+    ) for Pod::POM::View::HTML::Filter->filters;
+
+and set all existing filters back to default.
 
 =item perl_filter
 

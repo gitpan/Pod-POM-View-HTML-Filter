@@ -1,17 +1,12 @@
---- #YAML:1.0
-name: Pod-POM-View-HTML-Filter
-version: 0.03
-author: Philippe "BooK" Bruhat <book@cpan.org>
-abstract: Use filters on sections of your pod documents
-license: perl
+# http://module-build.sourceforge.net/META-spec.html
+#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
+name:         Pod-POM-View-HTML-Filter
+version:      0.04
+version_from: lib/Pod/POM/View/HTML/Filter.pm
+installdirs:  site
 requires:
-  Pod::POM: 0.17
-  Test::More: 0
-recommends:
-  Perl::Tidy: 20031021
-  Syntax::Highlight::HTML: 0
-provides:
-  Pod::POM::View::HTML::Filter:
-    file: lib/Pod/POM/View/HTML/Filter.pm
-    version: 0.03
-generated_by: Module::Build version 0.25
+    Pod::POM:                      0.17
+    Test::More:                    0
+
+distribution_type: module
+generated_by: ExtUtils::MakeMaker version 6.17
