@@ -3,24 +3,30 @@ use base 'Pod::POM::View::HTML';
 
 use warnings;
 use strict;
+use Carp;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 my %filter;
-my %prereq = (
-    perl => [ qw( Perl::Tidy ) ],
+my %builtin = (
+    perl => {
+        code     => \&perl_filter,
+        requires => [ qw( Perl::Tidy ) ],
+        verbatim => 1,
+    },
+    html => {
+        code     => \&html_filter,
+        requires => [ qw( Syntax::Highlight::HTML ) ],
+        verbatim => 1,
+    },
 );
 
+my $HTML_PROTECT;
+
 # automatically register built-in handlers
-for my $lang ( keys %prereq ) {
-    my $nok = 0;
-    for ( @{ $prereq{$lang} } ) {
-        eval "require $_;";
-        $nok++ if $@;
-    }
-    no strict 'refs';
-    $filter{$lang} = \&{"${lang}_filter"} unless $nok;
-}
+my $INIT = 1;
+add( "PPVHF", %builtin );
+$INIT = 0;
 
 #
 # Specific methods
@@ -38,7 +44,23 @@ sub new {
 
 sub add {
     my ($class, %args) = @_;
-    $filter{$_} = $args{$_} for keys %args;
+    for my $lang ( keys %args ) {
+        my $nok = 0;
+        if( exists $args{$lang}{requires} ) {
+            for ( @{ $args{$lang}{requires} } ) {
+                eval "require $_;";
+                if ($@) {
+                    $nok++;
+                    carp "$lang: pre-requisite $_ could not be loaded"
+                      unless $INIT;    # don't warn for built-ins
+                }
+            }
+        }
+        croak "$lang: no code parameter given"
+          unless exists $args{$lang}{code};
+
+        $filter{$lang} = $args{$lang} unless $nok;
+    }
 }
 
 sub know {
@@ -55,11 +77,11 @@ sub view_for {
     my ($self, $for)    = @_;
     my $format = $for->format;
 
-    return $for->text() . "\n\n" if $format =~ /\bhtml\b/;
+    return $for->text() . "\n\n" if $format =~ /^html\b/;
     if ( $format =~ /^filter\b/ ) {
         my $lang = (split '=', $format)[1];
         if( exists $filter{$lang} ) {
-            return $filter{$lang}->( $for->text, "" ) . "\n\n";
+            return $filter{$lang}{code}->( $for->text, "" ) . "\n\n";
         }
         else { warn "$lang not supported in =for filter"; }
     }
@@ -77,9 +99,19 @@ sub view_begin {
     elsif( $format eq 'filter' ) {
         my ($lang, $opts) = split(' ', $args, 2);
         if( exists $filter{$lang} ) {
-            push @{$self->{FILTER}}, [ $lang, $opts ];
-            my $output = $begin->content->present($self);
-            pop @{$self->{FILTER}};
+            my $output;
+            if( $filter{$lang}{verbatim} ) {
+                $HTML_PROTECT++;
+                $output =
+                  $filter{$lang}{code}
+                  ->( join( "\n\n", map { $_->text } $begin->content), $opts );
+                $HTML_PROTECT--;
+            }
+            else {
+                push @{$self->{FILTER}}, [ $lang, $opts ];
+                $output = $begin->content->present($self);
+                pop @{$self->{FILTER}};
+            }
             return $output;
         }
         else { warn "$lang not supported in =begin filter"; }
@@ -91,8 +123,8 @@ sub view_begin {
 sub view_textblock {
     my ($self, $text) = @_;
     if( $self->{FILTER}[-1] ) {
-        $text = $filter{$self->{FILTER}[-1][0]}->($text,
-                                                  $self->{FILTER}[-1][1]);
+        $text = $filter{ $self->{FILTER}[-1][0] }{code}
+                ->( $text, $self->{FILTER}[-1][1] );
     }
     return "<p>$text</p>\n";
 }
@@ -101,13 +133,68 @@ sub view_verbatim {
     my ($self, $text) = @_;
     
     if( $self->{FILTER}[-1] ) {
-        $text = $filter{$self->{FILTER}[-1][0]}->($text,
-                                                  $self->{FILTER}[-1][1]);
+        $text = $filter{$self->{FILTER}[-1][0]}{code}
+                ->($text, $self->{FILTER}[-1][1]);
     }
     else { # default
         return $self->SUPER::view_verbatim( $text );
     }
     return "<pre>$text</pre>\n\n";
+}
+
+# mostly taken from Pod::POM::View::HTML
+# because it's a closure around the syntactical $HTML_PROTECT
+
+# this code has been borrowed from Pod::Html
+my $urls = '(' . join ('|',
+     qw{
+       http
+       telnet
+       mailto
+       news
+       gopher
+       file
+       wais
+       ftp
+     } ) . ')';
+my $ltrs = '\w';
+my $gunk = '/#~:.?+=&%@!\-';
+my $punc = '.:!?\-;';
+my $any  = "${ltrs}${gunk}${punc}";
+
+sub view_seq_text {
+     my ($self, $text) = @_;
+
+     unless ($HTML_PROTECT) {
+        for ($text) {
+            s/&/&amp;/g;
+            s/</&lt;/g;
+            s/>/&gt;/g;
+        }
+     }
+
+     $text =~ s{
+        \b                           # start at word boundary
+         (                           # begin $1  {
+           $urls     :               # need resource and a colon
+          (?!:)                     # Ignore File::, among others.
+           [$any] +?                 # followed by one or more of any valid
+                                     #   character, but be conservative and
+                                     #   take only what you need to....
+         )                           # end   $1  }
+         (?=                         # look-ahead non-consumptive assertion
+                 [$punc]*            # either 0 or more punctuation followed
+                 (?:                 #   followed
+                     [^$any]         #   by a non-url char
+                     |               #   or
+                     $               #   end of the string
+                 )                   #
+             |                       # or else
+                 $                   #   then end of the string
+         )
+       }{<a href="$1">$1</a>}igox;
+
+     return $text;
 }
 
 # perl highlighting, thanks to Perl::Tidy
@@ -128,7 +215,17 @@ sub perl_filter {
     $output =~ s!\n</pre>\n\z!!m; #             and "\n</pre>\n"
     $output =~ s/^/$ws/gm;        # put the indentation back
 
-    return $output;
+    return "<pre>$output</pre>\n";
+}
+
+# HTML highlighting thanks to Syntax::Highlight::HTML
+my %html_filter_parser;
+sub html_filter {
+    my ($code, $opts) = ( shift, shift || "" );
+
+    my $parser = $html_filter_parser{$opts}
+      ||= Syntax::Highlight::HTML->new( map { (split /=/) } split ' ', $opts );
+    return $parser->parse($code);
 }
 
 1;
@@ -167,7 +264,12 @@ In your Pod:
 In your code:
 
     my $view = Pod::POM::View::HTML::Filter->new;
-    $view->add( foo => sub { my $s = shift; $s =~ s/foo/bar/gm; $s } );
+    $view->add(
+        foo => {
+            code => sub { my $s = shift; $s =~ s/foo/bar/gm; $s },
+            # other options are available
+        }
+    );
 
     my $pom = Pod::POM->parse_file( '/my/pod/file' );
     $pom->present($view);
@@ -200,13 +302,27 @@ The following methods are available:
 
 =over 4
 
-=item add( lang => $coderef, ... )
+=item add( lang => { options }, ... )
 
-Add support for one or more languages.
+Add support for one or more languages. Options are passed in a hash
+reference.
 
-The code reference must take a string as its only argument and return
-the formatted HTML string (coloured accordingly to the language grammar,
-hopefully).
+The required C<code> option is a reference to the filter routine. The
+filter must take a string as its only argument and return the formatted
+HTML string (coloured accordingly to the language grammar, hopefully).
+
+Available options are:
+
+    Name       Type       Content
+    ----       ----       -------
+
+    code       CODEREF    filter implementation
+
+    verbatim   BOOLEAN    if true, force the full content of the
+                          =begin/=end block to be passed verbatim
+                          to the filter
+
+    requires   ARRAYREF   list of required modules for this filter
 
 Note that C<add()> is a class method.
 
@@ -230,6 +346,31 @@ Pod::POM::View::HTML::Filter:
 =item new()
 
 The overloaded constructor initialises some internal structures.
+This means that you'll have to use a instance of the class as a
+view for your Pod::POM object. Therefore you must use C<new>.
+
+    $Pod::POM::DEFAULT_VIEW = 'Pod::POM::View::HTML::Filter'; # WRONG
+    $pom->present( 'Pod::POM::View::HTML::Filter' );          # WRONG
+
+    # this is CORRECT
+    $Pod::POM::DEFAULT_VIEW = Pod::POM::View::HTML::Filter->new;
+
+    # this is also CORRECT
+    my $view = Pod::POM::View::HTML::Filter->new;
+    $pom->present( $view );
+
+=item view_begin
+
+To be used as:
+
+    =begin filter lang options
+
+    # some code in language lang
+
+    =end filter
+
+The options are passed as a single string to the filter routine which
+must do its own parsing.
 
 =item view_for
 
@@ -238,21 +379,18 @@ To be used as:
     =for filter=lang
     # some code in language lang
 
-=item view_begin
-
-To be used as:
-
-    =begin filter lang
-
-    # some code in language lang
-
-    =end filter
+The C<=for> construct does not support filter options.
 
 =item view_textblock
 =item view_verbatim
 
 Since C<=begin>/C<=end> and C<=for> blocks contain C<verbatim> and C<text>,
 only these methods are overloaded.
+
+=item view_seq_text
+
+This method was copied verbatim from Pod::POM::View::HTML.
+This is an ugly hack and should disappear in future releases.
 
 =back
 
@@ -272,41 +410,23 @@ It accepts options to Perl::Tidy, such as C<-nnn> to number lines of
 code. Check Perl::Tidy's documentation for more information about
 those options.
 
+=item html_filter
+
+This filter does HTML syntax highlighting with the help of
+Syntax::Highlight::HTML.
+
+The filter supports Syntax::Highlight::HTML options:
+
+    =begin filter html nnn=1
+
+    <p>The lines of the HTML code will be numbered.</p>
+    <p>This is line 2.</p>
+
+    =end filter
+
+See Syntax::Highlight::HTML for the list of supported options.
+
 =back
-
-=head1 DEFAULT CSS STYLES
-
-Since the first motivation for this module was to colour Perl code
-with Perl::Tidy, the colour-coded HTML is meant to use a CSS file
-based on Perl::Tidy's stylesheet.
-
-Perl::Tidy's HTML code looks like:
-
-    <span class="i">$A</span>++<span class="sc">;</span>
-
-Here are the styles used by Perl::Tidy:
-
-    n       numeric
-    p       paren
-    q       quote
-    s       structure
-    c       comment
-    v       v-string
-    cm      comma
-    w       bareword
-    co      colon
-    pu      punctuation
-    i       identifier
-    j       label
-    h       here-doc-target
-    hh      here-doc-text
-    k       keyword
-    sc      semicolon
-    m       subroutine
-    pd      pod-text
-
-You can use your own style names, but extending Perl::Tidy's scheme will
-ensure that all your syntax-highlighted sections have a consistent look.
 
 =head1 WRITING YOUR OWN FILTERS
 
@@ -317,7 +437,10 @@ string.
 The filter is then added to Pod::POM::View::HTML::Filter with the
 add() method:
 
-    $view->add( \&foo_filter );
+    $view->add( foo => {
+        code     => \&foo_filter,
+        requires => [],
+    );
 
 When presenting the following piece of pod,
 
@@ -337,11 +460,62 @@ the option string itself.
 Please note that when called in a C<=for> construct, no option string
 is passed to the filter.
 
+=head1 BUILT-IN FILTERS CSS STYLES
+
+Each filter defines its own CSS styles, so that one can define their
+favourite colours in a custom CSS file.
+
+=head2 C<perl> filter
+
+Perl::Tidy's HTML code looks like:
+
+    <span class="i">$A</span>++<span class="sc">;</span>
+
+Here are the styles used by Perl::Tidy:
+
+    n        numeric
+    p        paren
+    q        quote
+    s        structure
+    c        comment
+    v        v-string
+    cm       comma
+    w        bareword
+    co       colon
+    pu       punctuation
+    i        identifier
+    j        label
+    h        here-doc-target
+    hh       here-doc-text
+    k        keyword
+    sc       semicolon
+    m        subroutine
+    pd       pod-text
+
+=head2 C<html> filter
+
+Syntax::Highlight::HTML defines the following styles:
+
+    h-decl   declaration      # declaration <!DOCTYPE ...>
+    h-pi     process          # process instruction <?xml ...?>
+    h-com    comment          # comment <!-- ... -->
+    h-ab     angle_bracket    # the characters '<' and '>' as tag delimiters
+    h-tag    tag_name         # the tag name of an element
+    h-attr   attr_name        # the attribute name
+    h-attv   attr_value       # the attribute value
+    h-ent    entity           # any entities: &eacute; &#171;
+
 =head1 AUTHOR
 
 Philippe "BooK" Bruhat, C<< <book@cpan.org> >>
 
-=head1 Bugs
+=head1 THANKS
+
+Many thanks to Sébastien Aperghis-Tramoni (Maddingue), who helped
+debugging the module and wrote Syntax::Highlight::HTML so that I
+could ship the C<html> filter.
+
+=head1 BUGS
 
 Please report any bugs or feature requests to
 C<bug-pod-pom-view-html-filter@rt.cpan.org>, or through the web interface at

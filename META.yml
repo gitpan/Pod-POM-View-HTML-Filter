@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name: Pod-POM-View-HTML-Filter
-version: 0.02
+version: 0.03
 author: Philippe "BooK" Bruhat <book@cpan.org>
 abstract: Use filters on sections of your pod documents
 license: perl
@@ -9,8 +9,9 @@ requires:
   Test::More: 0
 recommends:
   Perl::Tidy: 20031021
+  Syntax::Highlight::HTML: 0
 provides:
   Pod::POM::View::HTML::Filter:
     file: lib/Pod/POM/View/HTML/Filter.pm
-    version: 0.02
+    version: 0.03
 generated_by: Module::Build version 0.25

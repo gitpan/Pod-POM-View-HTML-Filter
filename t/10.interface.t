@@ -1,4 +1,4 @@
-use Test::More tests => 8;
+use Test::More tests => 9;
 use strict;
 use Pod::POM;
 use Pod::POM::View::HTML::Filter;
@@ -12,7 +12,7 @@ ok( ! $view->know( 'foo' ), "Don't know foo" );
 
 # test add, know and filters as class methods
 Pod::POM::View::HTML::Filter->add(
-    foo  => sub { my $s = shift; $s =~ s/foo/bar/g; $s },
+    foo  => { code => sub { my $s = shift; $s =~ s/foo/bar/g; $s } },
 );
 @foo_filters = grep { /^foo$/ } Pod::POM::View::HTML::Filter->filters;
 is( @foo_filters, 1, "There's a foo filter now");
@@ -20,9 +20,13 @@ ok( Pod::POM::View::HTML::Filter->know( 'foo' ), "Hey, I know foo now" );
 ok( ! Pod::POM::View::HTML::Filter->know( 'bar' ), "Don't know bar" );
 
 # test add, know and filters as instance methods
-$view->add( foo2 => sub { "foo" } );
+$view->add( foo2 => { code => sub { "foo" } } );
 @foo_filters = grep { /^foo/ } $view->filters;
 is( @foo_filters, 2, "There are two foo filters");
 ok( $view->know( 'foo2' ), "Hey, I know foo2 now" );
 ok( ! $view->know( 'bar' ), "Still don't know bar" );
+
+# test errors
+eval { $view->add( klonk => { verbatim => 1 } ) };
+like( $@, qr/^klonk: no code parameter given/, "code is required for add()" );
 
