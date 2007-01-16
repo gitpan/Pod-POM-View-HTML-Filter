@@ -6,12 +6,20 @@ use warnings;
 use strict;
 use Carp;
 
-our $VERSION = '0.05';
-our $default = { code     => sub { $_[0] } };
+our $VERSION = '0.06';
 
 my %filter;
 my %builtin = (
-    default => $default,
+    default => {
+        code => sub {
+            my $s = shift;
+            $s =~ s/&/&amp;/g;
+            $s =~ s/</&lt;/g;
+            $s =~ s/>/&gt;/g;
+            $s;
+        },
+        verbatim => 1,
+    },
     perl => {
         code     => \&perl_filter,
         requires => [qw( Perl::Tidy )],
@@ -29,8 +37,6 @@ my %builtin = (
     },
 );
 
-my $HTML_PROTECT = 0;
-
 # automatically register built-in handlers
 my $INIT = 1;
 add( "PPVHF", %builtin );
@@ -41,17 +47,21 @@ $INIT = 0;
 #
 sub new {
     my $class = shift;
-    my $self = $class->SUPER::new(@_)
-        || return;
-
-    # initalise stack for maintaining info for filters
-    $self->{ FILTER } = [];
-
-    return $self;
+    return $class->SUPER::new(
+        auto_unindent => 1,
+        @_,
+        filter => {},    # instance filters
+        FILTER => [],    # stack maintaining info for filters
+    );
 }
 
 sub add {
-    my ($class, %args) = @_;
+    my ($self, %args) = @_;
+    my $filter = ref $self
+        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
+        ? $self->{filter}
+        : \%filter;
+
     for my $lang ( keys %args ) {
         my $nok = 0;
         if( exists $args{$lang}{requires} ) {
@@ -67,16 +77,40 @@ sub add {
         croak "$lang: no code parameter given"
           unless exists $args{$lang}{code};
 
-        $filter{$lang} = $args{$lang} unless $nok;
+        $filter->{$lang} = $args{$lang} unless $nok;
     }
 }
 
-sub know {
-    my ($class, $lang) = @_;
-    return exists $filter{$lang};
+sub delete {
+    my ( $self, $lang ) = @_;
+    my $filter =
+        ref $self
+        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
+        ? $self->{filter}
+        : \%filter;
+    my $old = $self->_filter()->{$lang};
+    $filter->{$lang} = undef;
+    return $old;
 }
 
-sub filters { keys %filter; }
+# return a hashref of current filters for the class|instance
+sub _filter {
+    my ($self) = @_;
+    my $filter =
+        ref $self
+        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
+        ? { %filter, %{ $self->{filter} } }
+        : {%filter};
+    $filter->{$_} || delete $filter->{$_} for keys %$filter;
+    return $filter;
+}
+
+sub know {
+    my ($self, $lang) = @_;
+    return exists $self->_filter()->{$lang};
+}
+
+sub filters { keys %{ $_[0]->_filter() }; }
 
 #
 # overridden Pod::POM::View::HTML methods
@@ -84,6 +118,7 @@ sub filters { keys %filter; }
 sub view_for {
     my ($self, $for)    = @_;
     my $format = $for->format;
+    my $filter = $self->_filter();
 
     return $for->text() . "\n\n" if $format =~ /^html\b/;
 
@@ -91,22 +126,28 @@ sub view_for {
         my $args   = (split '=', $format, 2)[1];
         return '' unless defined $args; # silently skip
 
-        my $output = $for->text;
-        my $verbatim;
+        my $text = $for->text;
+        my $verbatim = 0;
 
-        # stacked filters
+        # select the filters and options
+        my @langs;
         for my $lang (split /\|/, $args) {
             ( $lang, my $opts ) = ( split( ':', $lang, 2 ), '' );
             $opts =~ y/:/ /;
-            $lang   = exists $filter{$lang} ? $lang : 'default';
-
-            $output = $filter{$lang}{code}->( $output, "" );
-            $verbatim = $filter{$lang}{verbatim};
+            $lang = exists $filter->{$lang} ? $lang : 'default';
+            push @langs, [ $lang, $opts ];
+            $verbatim++ if $filter->{$lang}{verbatim};
         }
-        return sprintf(
-            ( $verbatim ? "<pre>%s</pre>\n" : "%s\n\n" ),
-            $output
-        );
+
+        # cancel filtering if one filter is missing
+        @langs = ( grep { $_->[0] eq 'default' } @langs )
+            ? ( [ 'default', '' ] )
+            : @langs;
+
+        # process the text
+        $text = $filter->{ $_->[0] }{code}->( $text, $_->[1] ) for @langs;
+
+        return $verbatim ? "<pre>$text</pre>\n" : "<p>$text</p>\n";
     }
 
     # fall-through
@@ -116,6 +157,7 @@ sub view_for {
 sub view_begin {
     my ($self, $begin)  = @_;
     my ($format, $args) = split(' ', $begin->format(), 2);
+    my $filter = $self->_filter();
 
     if ( $format eq 'html' ) {
         return $self->SUPER::view_begin( $begin );
@@ -125,56 +167,47 @@ sub view_begin {
 
         # fetch the text and verbatim blocks in the begin section
         # and remember the type of each block
+        my $verbatim = 0;
         my $prev = '';
-        my @blocks;
-        for( @{ $begin->content } ) {
-            # bare text blocks appear sometimes
-            my $type = ref $_ ? $_->type : 'text';
-
-            # catenate verbatim blocks together
-            push @blocks, [
-              ( $type eq $prev ? (pop @blocks)->[0] . "\n\n" : '' )
-                . $_->text(),
-              $type
-            ] if $type eq 'verbatim';
-
-            # stringification forces Pod::POM to present the $_ data in html
-            push @blocks, [
-              (s{\A<p>|</p>[\n\r]*\z}{}g, $_)[1],
-              $type
-            ] if $type eq 'text'; 
-
-            # remember what we just saw
-            $prev = $type;
+        my $text = '';
+        for my $item ( @{ $begin->content } ) {
+            $text .= ($prev ? "\n\n" :'') . $item->text();
+            $prev = 1;
+            $verbatim++ if $item->type() eq 'verbatim';
         }
 
-        # now pass the block list through the filter list
-        for my $block (@blocks) {
-            my $verbatim;
-            for my $f (@filters) {
-                my ( $lang, $opts ) = split( ' ', $f, 2 );
-                $lang = exists $filter{$lang} ? $lang : 'default';
-
-                $block->[0] = $filter{$lang}{code}->( $block->[0], $opts );
-                $verbatim   = $filter{$lang}{verbatim};
-            }
-
-            # the enclosing tags depend on the block and the last filter
-            $block = sprintf(
-                ( $verbatim || $block->[1] eq 'verbatim'
-                  ? "<pre>%s</pre>\n"
-                  : "<p>%s</p>\n"     ),
-                $block->[0]
-            );
+        # select the filters and options
+        my @langs;
+        for my $f (@filters) {
+            my ( $lang, $opts ) = split( ' ', $f, 2 );
+            $lang = exists $filter->{$lang} ? $lang : 'default';
+            push @langs, [ $lang, $opts ];
+            $verbatim++ if $filter->{$lang}{verbatim};
         }
 
-        # the tags depend on the last filter only
-        return join '', @blocks;
+        # cancel filtering if one filter is missing
+        @langs = ( grep { $_->[0] eq 'default' } @langs )
+            ? ( [ 'default', '' ] )
+            : @langs;
+
+        # process the text
+        ( my $indent, $text ) = _unindent($text)
+            if $self->{auto_unindent};
+        $text = $filter->{ $_->[0] }{code}->( $text, $_->[1] ) for @langs;
+        $text =~ s/^(?=.+)/$indent/gm
+            if $self->{auto_unindent};
+
+        # the enclosing tags depend on the block and the last filter
+        return $verbatim ? "<pre>$text</pre>\n" : "<p>$text</p>\n";
     }
 
     # fall-through
     return '';
 }
+
+#
+# utility functions
+#
 
 # a simple filter output cleanup routine
 sub _cleanup {
@@ -183,12 +216,28 @@ sub _cleanup {
     $_;
 }
 
+sub _unindent {
+    my $str = shift;
+    my $indent;
+    while ( $str =~ /^( *)\S/gmc ) {
+        $indent =
+              !defined $indent             ? $1
+            : length($1) < length($indent) ? $1
+            :                                $indent;
+    }
+    $indent ||= '';
+    $str =~ s/^$indent//gm;
+    return ( $indent, $str );
+}
+
+#
+# builtin filters
+#
+
 # perl highlighting, thanks to Perl::Tidy
 sub perl_filter {
     my ($code, $opts) = ( shift, shift || "" );
     my $output = "";
-    my ($ws) = $code =~ /^(\s*)/; # count the blanks on the first line
-    $code =~ s/^$ws//gm;          # remove them
 
     # Perl::Tidy 20031021 uses Getopt::Long and expects the default config
     # this is a workaround (a patch was sent to Perl::Tidy's author)
@@ -203,7 +252,6 @@ sub perl_filter {
         errorfile   => '-',
     );
     $output = _cleanup( $output ); # remove <pre></pre>
-    $output =~ s/^/$ws/gm;         # put the indentation back
 
     # put back Getopt::Long previous configuration, if needed
     Getopt::Long::Configure( $glc );
@@ -327,7 +375,7 @@ In your code:
 
 =head1 DESCRIPTION
 
-This module is a subclass of Pod::POM::View::HTML that support the
+This module is a subclass of C<Pod::POM::View::HTML> that support the
 C<filter> extension. This can be used in C<=begin> / C<=end> and
 C<=for> pod blocks.
 
@@ -344,13 +392,13 @@ or
     $pom->present;
 
 Even though the module was specifically designed
-for use with Perl::Tidy, you can write your own filters quite
+for use with C<Perl::Tidy>, you can write your own filters quite
 easily (see L<Writing your own filters>).
 
 =head1 FILTERING POD?
 
 The whole idea of this module is to take advantage of all the syntax
-colouring modules that exist (actually, Perl::Tidy was my first target)
+colouring modules that exist (actually, C<Perl::Tidy> was my first target)
 to produce colourful code examples in a POD document (after conversion
 to HTML).
 
@@ -445,71 +493,21 @@ will return C<bar ba! baz>.
 
 =head2 A note on verbatim and text blocks
 
-Verbatim paragraphs are catenated together to form a single block
-of text, that is passed to the filter. Text paragraphs can contain
-POD escape sequences, such as C<BE<lt>...E<gt>>.
+B<Note:> The fact that I mention I<verbatim> and I<paragraph> in
+this section is due to an old bug in C<Pod::POM>, which parses the
+content of C<begin>/C<end> sections as the usual POD paragraph
+and verbatim blocks. This is a bug in C<Pod::POM>, around which
+C<Pod::POM::View::HTML::Filter> tries to work around.
 
-These escape sequences are processed B<before> the paragraph is passed
-through the filter stack. A C<=for> block always contains a single text
-block, not a verbatim block, even if it starts with whitespace.
+As from version 0.06, C<Pod::POM::View::HTML::Filter> gets to the
+original text contained in the C<=begin> / C<=end> block (it was
+easier than I thought, actually) and put that string throught all
+the filters.
 
-This means that the following block:
-
-    =begin filter foo
-
-    a paragraph
-
-        verbatim 1
-
-        verbatim 2
-
-    another paragraph
-    somewhat longer
-
-    a third paragraph
-
-        verbatim 3
-
-    =end
-
-will be handled as five separate blocks:
-
-=over 4
-
-=item *
-
-a text block
-
-C<a paragraph>
-
-=item *
-
-a three line verbatim block
-
-C<    verbatim 1>, blank line, C<    verbatim 2>
-
-=item *
-
-a two line long text block
-
-C<another paragraph>, C<somewhat longer>
-
-=item *
-
-a single line text block 
-
-C<a third paragraph>
-
-=item *
-
-and a last verbatim block
-
-C<    verbatim 3>
-
-=back
-
-Each block will be filtered independently by the filter stack and the result
-will be catenated together and output in your HTML document.
+If any filter in the stack is defined as C<verbatim>, or if C<Pod::POM>
+detect any block in the C<=begin> / C<=end> block as verbatim, then
+the output will be produced between C<< <pre> >> and C<< </pre> >> tags.
+Otherwise, C<< <p> >> and C<< </p> >> tags will be used.
 
 =head2 Examples
 
@@ -582,15 +580,16 @@ Which produces the rather unreadable piece of HTML:
 
 =head2 Caveats
 
-There are a few things to keep in mind when mixing verbatim and text paragraphs
-in a C<=begin> block.
+There were a few things to keep in mind when mixing verbatim and text paragraphs
+in a C<=begin> block. These problems do not exist any more as from version
+0.06.
 
 =over 4
 
-=item Text paragraphs are processed for POD escapes
+=item Text paragraphs are not processed for POD escapes any more
 
-Since a text paragraph is preprocessed for POD escape sequences, the
-following block
+Because the C<=begin> / C<=end> block is now processed as a single
+string of text, the following block:
 
     =begin filter html
 
@@ -598,20 +597,20 @@ following block
 
     =end
 
-will be transformed into C< <b>foo</b> > before being passed to the
-filters, which will produce this:
+will not be transformed into C< <b>foo</b> > before being passed to the
+filters, but will produce the expected:
 
-    <pre><span class="h-ab">&lt;</span><span class="h-tag">b</span><span class="h-ab">&gt;</span>foo<span class="h-ab">&lt;/</span><span class="h-tag">b</span><span class="h-ab">&gt;</span></pre>
+    <pre>B<span class="h-ab">&lt;</span><span class="h-tag">foo</span><span class="h-ab">&gt;</span></pre>
 
 =begin html
 
 <p>This will be rendered by your web browser as:</p>
 
-    <pre><span class="h-ab">&lt;</span><span class="h-tag">b</span><span class="h-ab">&gt;</span>foo<span class="h-ab">&lt;/</span><span class="h-tag">b</span><span class="h-ab">&gt;</span></pre>
+    <pre>B<span class="h-ab">&lt;</span><span class="h-tag">foo</span><span class="h-ab">&gt;</span></pre>
 
 =end html
 
-Whereas the same text in a verbatim block
+And the same text in a verbatim block
 
     =begin filter html
     
@@ -619,7 +618,7 @@ Whereas the same text in a verbatim block
 
     =end
 
-will produce:
+will produce the same results.
 
     <pre>    B<span class="h-ab">&lt;</span><span class="h-tag">foo</span><span class="h-ab">&gt;</span></pre>
 
@@ -631,12 +630,12 @@ will produce:
 
 =end html
 
-Not quite the same, isn't it?
+Which looks quite the same, doesn't it?
 
-=item Separate paragraphs are filtered separately
+=item Separate paragraphs aren't filtered separately any more
 
-As seen in L<A note on verbatim and text blocks>, the filter processes
-each verbatim and text paragraph independently. So, if you have a filter
+As seen in L<A note on verbatim and text blocks>, the filter now processes
+the begin block as a single string of text. So, if you have a filter
 that replace each C<*> character with an auto-incremented number in
 square brackets, like this:
 
@@ -661,14 +660,15 @@ And you try to process the following block:
     
     =end filter
 
-Don't be surprised when you read the result:
+You'll get the expected result (contrary to previous versions):
 
-    <p>TIMTOWDI[2], but your library should DWIM[3] when possible.</p>
-    <p>You can't always claims that PICNIC[2], can you?</p>
+    <p>TIMTOWDI[2], but your library should DWIM[3] when possible.
+    
+    You can't always claims that PICNIC[4], can you?</p>
 
-The filter was actually called twice, starting at C<2>, just like requested.
+The filter was really called only once, starting at C<2>, just like requested.
 
-Future versions of Pod::POM::View::HTML::Filter I<may> support
+Future versions of C<Pod::POM::View::HTML::Filter> I<may> support
 C<init>, C<begin> and C<end> callbacks to run filter initialisation and
 clean up code.
 
@@ -704,7 +704,20 @@ Available options are:
 
     requires   ARRAYREF   list of required modules for this filter
 
-Note that C<add()> is a class method.
+Note that C<add()> is both a class and an instance method.
+
+When used as a class method, the new language is immediately available
+for all future and existing instances.
+
+When used as an instance method, the new language is only available for
+the instance itself.
+
+=item C<delete( $lang )>
+
+Remove the given language from the list of class or instance filters.
+The deleted filter is returned by this method.
+
+C<delete()> is both a class and an instance method, just like C<add()>.
 
 =item C<filters()>
 
@@ -718,8 +731,8 @@ Return true if the view knows how to handle language C<$lang>.
 
 =head2 Overloaded methods
 
-The following Pod::POM::View::HTML methods are overridden in
-Pod::POM::View::HTML::Filter:
+The following C<Pod::POM::View::HTML> methods are overridden in
+C<Pod::POM::View::HTML::Filter>:
 
 =over 4
 
@@ -727,7 +740,7 @@ Pod::POM::View::HTML::Filter:
 
 The overloaded constructor initialises some internal structures.
 This means that you'll have to use a instance of the class as a
-view for your Pod::POM object. Therefore you must use C<new>.
+view for your C<Pod::POM> object. Therefore you must use C<new>.
 
     $Pod::POM::DEFAULT_VIEW = 'Pod::POM::View::HTML::Filter'; # WRONG
     $pom->present( 'Pod::POM::View::HTML::Filter' );          # WRONG
@@ -738,6 +751,10 @@ view for your Pod::POM object. Therefore you must use C<new>.
     # this is also CORRECT
     my $view = Pod::POM::View::HTML::Filter->new;
     $pom->present( $view );
+
+The only option at this time is C<auto_unindent>, which is enabled by
+default. This option remove leading indentation from all verbatim blocks
+within the begin blocks, and put it back after highlighting.
 
 =item C<view_begin()>
 
@@ -751,14 +768,14 @@ These are the methods that support the C<filter> format.
 
 =head2 Built-in filters
 
-Pod::POM::View::HTML::Filter is shipped with a few built-in filters.
+C<Pod::POM::View::HTML::Filter> is shipped with a few built-in filters.
 
 =over 4
 
 =item default
 
 This filter is called when the required filter is not known by
-Pod::POM::View::HTML::Filter. It does nothing more than normal POD
+C<Pod::POM::View::HTML::Filter>. It does nothing more than normal POD
 processing (POD escapes for text paragraphs and C<< <pre> >> for
 verbatim paragraphs.
 
@@ -774,18 +791,18 @@ and set all existing filters back to default.
 =item perl_filter
 
 This filter does Perl syntax highlighting with a lot of help from
-Perl::Tidy.
+C<Perl::Tidy>.
 
-It accepts options to Perl::Tidy, such as C<-nnn> to number lines of
-code. Check Perl::Tidy's documentation for more information about
+It accepts options to C<Perl::Tidy>, such as C<-nnn> to number lines of
+code. Check C<Perl::Tidy>'s documentation for more information about
 those options.
 
 =item html_filter
 
 This filter does HTML syntax highlighting with the help of
-Syntax::Highlight::HTML.
+C<Syntax::Highlight::HTML>.
 
-The filter supports Syntax::Highlight::HTML options:
+The filter supports C<Syntax::Highlight::HTML> options:
 
     =begin filter html nnn=1
 
@@ -794,14 +811,14 @@ The filter supports Syntax::Highlight::HTML options:
 
     =end filter
 
-See Syntax::Highlight::HTML for the list of supported options.
+See C<Syntax::Highlight::HTML> for the list of supported options.
 
 =item shell_filter
 
 This filter does shell script syntax highlighting with the help of
-Syntax::Highlight::Shell.
+C<Syntax::Highlight::Shell>.
 
-The filter supports Syntax::Highlight::Shell options:
+The filter supports C<Syntax::Highlight::Shell> options:
 
     =begin filter shell nnn=1
 
@@ -810,7 +827,7 @@ The filter supports Syntax::Highlight::Shell options:
 
     =end filter
 
-See Syntax::Highlight::Shell for the list of supported options.
+See C<Syntax::Highlight::Shell> for the list of supported options.
 
 =back
 
@@ -820,7 +837,7 @@ Write a filter is quite easy: a filter is a subroutine that takes two
 arguments (text to parse and option string) and returns the filtered
 string.
 
-The filter is added to Pod::POM::View::HTML::Filter's internal filter
+The filter is added to C<Pod::POM::View::HTML::Filter>'s internal filter
 list with the C<add()> method:
 
     $view->add(
@@ -860,11 +877,11 @@ favourite colours in a custom CSS file.
 
 =head2 C<perl> filter
 
-Perl::Tidy's HTML code looks like:
+C<Perl::Tidy>'s HTML code looks like:
 
     <span class="i">$A</span>++<span class="sc">;</span>
 
-Here are the styles used by Perl::Tidy:
+Here are the styles used by C<Perl::Tidy>:
 
     n        numeric
     p        paren
@@ -887,7 +904,7 @@ Here are the styles used by Perl::Tidy:
 
 =head2 C<html> filter
 
-Syntax::Highlight::HTML makes use of the following styles:
+C<Syntax::Highlight::HTML> makes use of the following styles:
 
     h-decl   declaration    # declaration <!DOCTYPE ...>
     h-pi     process        # process instruction <?xml ...?>
@@ -900,7 +917,7 @@ Syntax::Highlight::HTML makes use of the following styles:
 
 =head2 C<shell> filter
 
-Syntax::Highlight::Shell makes use of the following styles:
+C<Syntax::Highlight::Shell> makes use of the following styles:
 
     s-key                   # shell keywords (like if, for, while, do...)
     s-blt                   # the builtins commands
@@ -929,8 +946,8 @@ Philippe "BooK" Bruhat, C<< <book@cpan.org> >>
 =head1 THANKS
 
 Many thanks to Sébastien Aperghis-Tramoni (Maddingue), who helped
-debugging the module and wrote Syntax::Highlight::HTML and
-Syntax::Highlight::Shell so that I could ship PPVHF with more than
+debugging the module and wrote C<Syntax::Highlight::HTML> and
+C<Syntax::Highlight::Shell> so that I could ship PPVHF with more than
 one filter.
 
 Perl code examples where borrowed in Amelia,

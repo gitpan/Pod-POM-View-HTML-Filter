@@ -6,79 +6,24 @@ use Pod::POM::View::HTML::Filter;
 $Pod::POM::DEFAULT_VIEW = Pod::POM::View::HTML::Filter->new;
 
 my @tests = map { [ split /^---.*?^/ms ] } split /^===.*?^/ms, << 'TESTS';
-=begin filter foo
+=begin filter bang | foo
 
 bar foo bar
-baz
 
-=end
+=end filter
 ---
 <html><body bgcolor="#ffffff">
-<p>bar bar bar
-baz</p>
+<pre>ba! bar ba!</pre>
 </body></html>
 ===
-=begin filter foo
+=begin filter foo | bang
 
-    foo bar baz
-
-=end filter foo
----
-<html><body bgcolor="#ffffff">
-<pre>    bar bar baz</pre>
-</body></html>
-===
-this line is considered code by Pod::POM
-
-=for filter=foo
 bar foo bar
 
-para
+=end filter
 ---
 <html><body bgcolor="#ffffff">
-<p>bar bar bar</p>
-<p>para</p>
-</body></html>
-===
-=pod
-
-para
-
-=for filter=foo
-bar bar foo
-foo bar bar
-
-para
----
-<html><body bgcolor="#ffffff">
-<p>para</p>
-<p>bar bar bar
-bar bar bar</p>
-<p>para</p>
-</body></html>
-===
-=begin filter options a b c
-
-The options are:
-
-=end
----
-<html><body bgcolor="#ffffff">
-<p>[The options are:]<a b c></p>
-</body></html>
-===
-=begin filter verb
-
-    verbatim block
-
-verbatim textblock
-
-=end
----
-<html><body bgcolor="#ffffff">
-<pre>    verbatim block
-
-verbatim textblock</pre>
+<pre>ba! ba! ba!</pre>
 </body></html>
 TESTS
 
@@ -88,7 +33,10 @@ plan tests => scalar @tests + 2;
 Pod::POM::View::HTML::Filter->add(
     foo     => { code => sub { my $s = shift; $s =~ s/foo/bar/g; $s } },
     options => { code => sub { "[$_[0]]<$_[1]>" } },
-    verb    => { code => sub { $_[0] }, verbatim => 1 },
+    bang => {
+        code     => sub { my $s = shift; $s =~ y/r/!/; $s },
+        verbatim => 1
+    },
 );
 
 my $parser = Pod::POM->new;
@@ -99,7 +47,7 @@ for ( @tests ) {
 
 # check what happens if $pom->present is called twice in a row
 my $pom = $parser->parse_text( << 'EOT' ) || diag $parser->error;
-=begin filter foo
+=begin filter foo | bang
 
     foo bar baz
 
@@ -107,7 +55,7 @@ my $pom = $parser->parse_text( << 'EOT' ) || diag $parser->error;
 EOT
 my $expected = << 'EOT';
 <html><body bgcolor="#ffffff">
-<pre>    bar bar baz</pre>
+<pre>    ba! ba! baz</pre>
 </body></html>
 EOT
 
