@@ -6,7 +6,7 @@ use warnings;
 use strict;
 use Carp;
 
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 my %filter;
 my %builtin = (
@@ -23,6 +23,11 @@ my %builtin = (
     perl => {
         code     => \&perl_filter,
         requires => [qw( Perl::Tidy )],
+        verbatim => 1,
+    },
+    ppi => {
+        code     => \&ppi_filter,
+        requires => [qw( PPI PPI::HTML )],
         verbatim => 1,
     },
     html => {
@@ -74,7 +79,7 @@ sub add {
                 eval "require $_;";
                 if ($@) {
                     $nok++;
-                    carp "$lang: pre-requisite $_ could not be loaded"
+                    carp "$lang\: pre-requisite $_ could not be loaded"
                       unless $INIT;    # don't warn for built-ins
                 }
             }
@@ -239,7 +244,7 @@ sub _unindent {
 # builtin filters
 #
 
-# perl highlighting, thanks to Perl::Tidy
+# Perl highlighting, thanks to Perl::Tidy
 sub perl_filter {
     my ($code, $opts) = ( shift, shift || "" );
     my $output = "";
@@ -267,6 +272,23 @@ sub perl_filter {
 # a cache for multiple parsers with the same options
 my %filter_parser;
 
+# Perl highlighting, thanks to PPI::HTML
+sub ppi_filter {
+    my ($code, $opts) = ( shift, shift || '');
+
+    # PPI::HTML options
+    my %ppi_opt = map { !/=/ && s/$/=1/ ; split /=/, $_, 2 } split / /, $opts;
+
+    # create PPI::HTML syntax highlighter
+    my $highlighter = $filter_parser{ppi}{$opts} ||= PPI::HTML->new(%ppi_opt);
+
+    # highlight the code and clean up the resulting HTML
+    my $pretty = $highlighter->html(\$code);
+    $pretty =~ s/<br>$//gsm;
+
+    return $pretty;
+}
+
 # HTML highlighting thanks to Syntax::Highlight::HTML
 sub html_filter {
     my ($code, $opts) = ( shift, shift || "" );
@@ -290,7 +312,7 @@ sub kate_filter {
     my ($code, $opts) = @_;
     my ($lang) = split ' ', $opts || ''; 
 
-    my $parser = $filter_parser{shell}{$lang}
+    my $parser = $filter_parser{kate}{$lang}
       ||= Syntax::Highlight::Engine::Kate->new(
         language => $lang,
         substitutions => {
@@ -842,6 +864,15 @@ It accepts options to C<Perl::Tidy>, such as C<-nnn> to number lines of
 code. Check C<Perl::Tidy>'s documentation for more information about
 those options.
 
+=item ppi_filter
+
+This filter does Perl syntax highlighting using C<PPI::HTML>, which is 
+itself based on the incredible C<PPI>.
+
+It accepts the same options as C<PPI::HTML>, which at this time solely 
+consist of C<line_numbers> to, as one may guess, add line numbers to the 
+output. 
+
 =item html_filter
 
 This filter does HTML syntax highlighting with the help of
@@ -902,6 +933,15 @@ The filter supports C<Syntax::Highlight::Engine::Kate> languages as options:
      
      =end filter
 
+Check the C<Syntax::Highlight::Engine::Kate> documentation for the full
+list of supported languages. Please note that some of them aren't well
+supported yet (by C<Syntax::Highlight::Engine::Kate>), so the output
+may not be what you expect.
+
+Here is a list of languages we have successfully tested with
+C<Syntax::Highlight::Engine::Kate> version 0.02:
+C<C>, C<Diff>, C<Fortran>, C<JavaScript>, C<LDIF>, C<SQL>.
+
 =back
 
 =head2 Writing your own filters
@@ -945,7 +985,7 @@ as before.
 
 =head1 BUILT-IN FILTERS CSS STYLES
 
-Each filter defines its own CSS styles, so that one can define their
+Each filter uses its own CSS classes, so that one can define their
 favourite colours in a custom CSS file.
 
 =head2 C<perl> filter
@@ -954,7 +994,7 @@ C<Perl::Tidy>'s HTML code looks like:
 
     <span class="i">$A</span>++<span class="sc">;</span>
 
-Here are the styles used by C<Perl::Tidy>:
+Here are the classes used by C<Perl::Tidy>:
 
     n        numeric
     p        paren
@@ -975,9 +1015,30 @@ Here are the styles used by C<Perl::Tidy>:
     m        subroutine
     pd       pod-text
 
+=head2 C<ppi> filter
+
+C<PPI::HTML> uses the following CSS classes: 
+
+    comment            
+    double             
+    heredoc_content    
+    interpolate        
+    keyword            for language keywords (my, use
+    line_number        
+    number             
+    operator           for language operators
+    pragma             for pragmatas (strict, warnings)
+    single             
+    structure          for syntaxic symbols
+    substitute         
+    symbol             
+    word               for module, function and method names
+    words              
+    match              
+
 =head2 C<html> filter
 
-C<Syntax::Highlight::HTML> makes use of the following styles:
+C<Syntax::Highlight::HTML> makes use of the following classes:
 
     h-decl   declaration    # declaration <!DOCTYPE ...>
     h-pi     process        # process instruction <?xml ...?>
@@ -990,7 +1051,7 @@ C<Syntax::Highlight::HTML> makes use of the following styles:
 
 =head2 C<shell> filter
 
-C<Syntax::Highlight::Shell> makes use of the following styles:
+C<Syntax::Highlight::Shell> makes use of the following classes:
 
     s-key                   # shell keywords (like if, for, while, do...)
     s-blt                   # the builtins commands
@@ -1006,7 +1067,7 @@ C<Syntax::Highlight::Shell> makes use of the following styles:
 =head2 C<kate> filter
 
 Output formatted with C<Syntax::Highlight::Engine::Kate> makes use
-of the following styles:
+of the following classes:
 
     k-alert                 # Alert
     k-basen                 # BaseN
@@ -1047,10 +1108,36 @@ Philippe "BooK" Bruhat, C<< <book@cpan.org> >>
 Many thanks to Sébastien Aperghis-Tramoni (Maddingue), who helped
 debugging the module and wrote C<Syntax::Highlight::HTML> and
 C<Syntax::Highlight::Shell> so that I could ship PPVHF with more than
-one filter.
+one filter. He also pointed me to C<Syntax::Highlight::Engine::Kate>,
+which led me to clean up PPVHF before adding support for SHEK.
 
 Perl code examples where borrowed in Amelia,
 aka I<Programming Perl, 3rd edition>.
+
+=head1 TODO
+
+There are a few other syntax highlighting modules on CPAN, which I should
+try to add support for in C<Pod::POM::View::HTML::Filter>:
+
+=over 4
+
+=item *
+
+C<Syntax::Highlight::Universal>
+
+=item *
+
+C<Syntax::Highlight::Mason>
+
+=item *
+
+C<Syntax::Highlight::Perl> (seems old)
+
+=item *
+
+C<Syntax::Highlight::Perl::Improved>
+
+=back
 
 =head1 BUGS
 

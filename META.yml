@@ -1,8 +1,22 @@
---- #YAML:1.0
+---
 name: Pod-POM-View-HTML-Filter
-version: 0.07
+version: 0.08
 author:
-  - Philippe "BooK" Bruhat <book@cpan.org>
+  - 'Philippe "BooK" Bruhat <book@cpan.org>'
 abstract: Use filters on sections of your pod documents
 license: perl
-generated_by: Module::Build version 0.2612, without YAML.pm
+requires:
+  Pod::POM: 0.17
+  Test::More: 0
+recommends:
+  PPI: 1.111
+  PPI::HTML: 1.06
+  Perl::Tidy: 20031021
+  Syntax::Highlight::Engine::Kate: 0.02
+  Syntax::Highlight::HTML: 0.02
+  Syntax::Highlight::Shell: 0.02
+provides:
+  Pod::POM::View::HTML::Filter:
+    file: lib/Pod/POM/View/HTML/Filter.pm
+    version: 0.08
+generated_by: Module::Build version 0.26
