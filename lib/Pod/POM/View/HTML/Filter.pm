@@ -6,10 +6,10 @@ use warnings;
 use strict;
 use Carp;
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
-my %filter;
-my %builtin = (
+my  %filter;
+our %builtin = (
     default => {
         code => sub {
             my $s = shift;
@@ -20,15 +20,17 @@ my %builtin = (
         },
         verbatim => 1,
     },
-    perl => {
-        code     => \&perl_filter,
+    perl_tidy => {
+        code     => \&perl_tidy_filter,
         requires => [qw( Perl::Tidy )],
         verbatim => 1,
+        alias    => [qw( perl )],
     },
-    ppi => {
-        code     => \&ppi_filter,
+    perl_ppi => {
+        code     => \&perl_ppi_filter,
         requires => [qw( PPI PPI::HTML )],
         verbatim => 1,
+        alias    => [qw( ppi )],
     },
     html => {
         code     => \&html_filter,
@@ -45,11 +47,21 @@ my %builtin = (
         requires => [qw( Syntax::Highlight::Engine::Kate )],
         verbatim => 1,
     },
+    wiki => {
+        code     => \&wiki_filter,
+        requires => [qw( Text::WikiFormat )],
+        verbatim => 0,
+    },
+    wikimedia => {
+        code     => \&wikimedia_filter,
+        requires => [qw( Text::MediawikiFormat )],
+        verbatim => 0,
+    },
 );
 
 # automatically register built-in handlers
 my $INIT = 1;
-add( "PPVHF", %builtin );
+Pod::POM::View::HTML::Filter->add( %builtin );
 $INIT = 0;
 
 #
@@ -67,10 +79,7 @@ sub new {
 
 sub add {
     my ($self, %args) = @_;
-    my $filter = ref $self
-        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
-        ? $self->{filter}
-        : \%filter;
+    my $filter = $self->__filter();
 
     for my $lang ( keys %args ) {
         my $nok = 0;
@@ -87,17 +96,18 @@ sub add {
         croak "$lang: no code parameter given"
           unless exists $args{$lang}{code};
 
-        $filter->{$lang} = $args{$lang} unless $nok;
+        if ( !$nok ) {
+            $filter->{$lang} = $args{$lang};
+            if ( $args{$lang}{alias} ) {
+                $filter->{$_} = $args{$lang} for @{ $args{$lang}{alias} };
+            }
+        }
     }
 }
 
 sub delete {
     my ( $self, $lang ) = @_;
-    my $filter =
-        ref $self
-        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
-        ? $self->{filter}
-        : \%filter;
+    my $filter = $self->__filter();
     my $old = $self->_filter()->{$lang};
     $filter->{$lang} = undef;
     return $old;
@@ -110,9 +120,19 @@ sub _filter {
         ref $self
         && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
         ? { %filter, %{ $self->{filter} } }
-        : {%filter};
+        : \%filter;
     $filter->{$_} || delete $filter->{$_} for keys %$filter;
     return $filter;
+}
+
+# return the real inner filter list for the class|instance
+sub __filter {
+    my ($self) = @_;
+    return
+        ref $self
+        && UNIVERSAL::isa( $self, 'Pod::POM::View::HTML::Filter' )
+        ? $self->{filter}
+        : \%filter;
 }
 
 sub know {
@@ -157,7 +177,7 @@ sub view_for {
         # process the text
         $text = $filter->{ $_->[0] }{code}->( $text, $_->[1] ) for @langs;
 
-        return $verbatim ? "<pre>$text</pre>\n" : "<p>$text</p>\n";
+        return $verbatim ? "<pre>$text</pre>\n" : "$text\n";
     }
 
     # fall-through
@@ -183,8 +203,11 @@ sub view_begin {
         for my $item ( @{ $begin->content } ) {
             $text .= ($prev ? "\n\n" :'') . $item->text();
             $prev = 1;
-            $verbatim++ if $item->type() eq 'verbatim';
+            $verbatim++ if $item->type eq 'verbatim';
         }
+
+        # a block is verbatim only if all subblocks are verbatim
+        $verbatim = 0 if $verbatim != @{ $begin->content };
 
         # select the filters and options
         my @langs;
@@ -208,7 +231,7 @@ sub view_begin {
             if $self->{auto_unindent};
 
         # the enclosing tags depend on the block and the last filter
-        return $verbatim ? "<pre>$text</pre>\n" : "<p>$text</p>\n";
+        return $verbatim ? "<pre>$text</pre>\n" : "$text\n";
     }
 
     # fall-through
@@ -244,8 +267,11 @@ sub _unindent {
 # builtin filters
 #
 
+# a cache for multiple parsers with the same options
+my %filter_parser;
+
 # Perl highlighting, thanks to Perl::Tidy
-sub perl_filter {
+sub perl_tidy_filter {
     my ($code, $opts) = ( shift, shift || "" );
     my $output = "";
 
@@ -269,11 +295,8 @@ sub perl_filter {
     return $output;
 }
 
-# a cache for multiple parsers with the same options
-my %filter_parser;
-
 # Perl highlighting, thanks to PPI::HTML
-sub ppi_filter {
+sub perl_ppi_filter {
     my ($code, $opts) = ( shift, shift || '');
 
     # PPI::HTML options
@@ -345,6 +368,18 @@ sub kate_filter {
     );
 
     return $parser->highlightText($code);
+}
+
+sub wiki_filter {
+    my ($code, $opts) = (shift, shift || '');
+    return Text::WikiFormat::format( $code , {},
+        { map { ( split /=/ ) } split ' ', $opts } );
+}
+
+sub wikimedia_filter {
+    my ($code, $opts) = (shift, shift || '');
+    return Text::MediawikiFormat::format( $code , {},
+        { map { ( split /=/ ) } split ' ', $opts } );
 }
 
 1;
@@ -574,7 +609,7 @@ the filters.
 If any filter in the stack is defined as C<verbatim>, or if C<Pod::POM>
 detect any block in the C<=begin> / C<=end> block as verbatim, then
 the output will be produced between C<< <pre> >> and C<< </pre> >> tags.
-Otherwise, C<< <p> >> and C<< </p> >> tags will be used.
+Otherwise, no special tags will be added (his is left to the formatter).
 
 =head2 Examples
 
@@ -837,6 +872,9 @@ These are the methods that support the C<filter> format.
 
 C<Pod::POM::View::HTML::Filter> is shipped with a few built-in filters.
 
+The name for the filter is obtained by removing C<_filter> from the
+names listed below (except for C<default>):
+
 =over 4
 
 =item default
@@ -846,16 +884,10 @@ C<Pod::POM::View::HTML::Filter>. It does nothing more than normal POD
 processing (POD escapes for text paragraphs and C<< <pre> >> for
 verbatim paragraphs.
 
-The default filter initialisation structure is available from
-C<$Pod::POM::View::HTML::Filter::default>. This allows one to do:
+You can use the C<delete()> method to remove a filter and therefore
+make it behave like C<default>.
 
-    Pod::POM::View::HTML::Filter->add(
-        $_ => $Pod::POM::View::HTML::Filter::default
-    ) for Pod::POM::View::HTML::Filter->filters;
-
-and set all existing filters back to default.
-
-=item perl_filter
+=item perl_tidy_filter
 
 This filter does Perl syntax highlighting with a lot of help from
 C<Perl::Tidy>.
@@ -864,7 +896,7 @@ It accepts options to C<Perl::Tidy>, such as C<-nnn> to number lines of
 code. Check C<Perl::Tidy>'s documentation for more information about
 those options.
 
-=item ppi_filter
+=item perl_ppi_filter
 
 This filter does Perl syntax highlighting using C<PPI::HTML>, which is 
 itself based on the incredible C<PPI>.
@@ -941,6 +973,30 @@ may not be what you expect.
 Here is a list of languages we have successfully tested with
 C<Syntax::Highlight::Engine::Kate> version 0.02:
 C<C>, C<Diff>, C<Fortran>, C<JavaScript>, C<LDIF>, C<SQL>.
+
+=item wiki_filter
+
+This filter converts the wiki format parsed by C<Text::WikiFormat>
+in HTML.
+
+The supported options are: C<prefix>, C<extended>, C<implicit_links>,
+C<absolute_links>. The option and value are separated by a C<=> character,
+as in the example below:
+
+    =begin filter wiki extended=1
+
+    [link|title]
+
+    =end
+
+=item wikimedia_filter
+
+This filter converts the wiki format parsed by C<Text::MediawikiFormat>
+in HTML.
+
+The supported options are: C<prefix>, C<extended>, C<implicit_links>,
+C<absolute_links> and C<process_html>. The option and value are separated
+by a C<=> character.
 
 =back
 
